@@ -178,6 +178,16 @@ This document records every bug found in the starter repository, including the f
   }
   ```
 
+  ### FIX-10
+- **File:** `frontend/package-lock.json`
+- **Line:** N/A — file was missing entirely
+- **Problem:** The frontend had no `package-lock.json`. The production
+  Dockerfile uses `npm ci` which strictly requires a lockfile to guarantee
+  deterministic, reproducible installs. Without it the build fails
+  immediately with `EUSAGE`.
+- **Fix:** Ran `npm install` locally inside `frontend/` to generate
+  `package-lock.json`, then committed it to the repository.
+
 ---
 
 ## Summary Table
@@ -193,3 +203,4 @@ This document records every bug found in the starter repository, including the f
 | FIX-07 | `frontend/app.js` | 5 | Docker networking — hardcoded localhost | Critical |
 | FIX-08 | `frontend/app.js` | — | Missing /health endpoint | High |
 | FIX-09 | `frontend/index.html` | ~32 | Infinite polling loop on failure | Medium |
+| FIX-10 | `frontend/packahe-lock.json` | NA | Entire file was missing on purpose even though crucial for production build | Critical |
