@@ -141,22 +141,26 @@ jobs:
           cat > api/tests/test_api.py << 'EOF'
           import pytest
           import fakeredis
+          import main
           from fastapi.testclient import TestClient
-          from unittest.mock import patch
 
-          # Patch redis.Redis before importing the app so the app's module-level
-          # `r = redis.Redis(...)` call gets the fake instead of a real connection.
+          # The app instantiates `r = redis.Redis(...)` at module level when
+          # main.py is first imported. Patching redis.Redis at that point is
+          # too late — the real client is already created. Instead we replace
+          # main.r directly with a FakeRedis instance, which is the actual
+          # object the route handlers call. Both fixtures share the same
+          # FakeServer so reads and writes see the same data.
+
           @pytest.fixture(autouse=True)
-          def fake_redis():
+          def fake_redis(monkeypatch):
               server = fakeredis.FakeServer()
               fake = fakeredis.FakeRedis(server=server)
-              with patch("redis.Redis", return_value=fake):
-                  yield fake
+              monkeypatch.setattr(main, "r", fake)
+              yield fake
 
           @pytest.fixture
-          def client(fake_redis):
-              from api.main import app
-              return TestClient(app)
+          def client():
+              return TestClient(main.app)
 
           # Test 1: Health endpoint returns 200 and correct body
           def test_health_endpoint(client):
@@ -164,25 +168,25 @@ jobs:
               assert response.status_code == 200
               assert response.json() == {"status": "ok"}
 
-          # Test 2: Creating a job returns a job_id and queues it in Redis
-          def test_create_job_returns_job_id(client, fake_redis):
+          # Test 2: Creating a job returns a job_id in UUID format
+          def test_create_job_returns_job_id(client):
               response = client.post("/jobs")
               assert response.status_code == 200
               data = response.json()
               assert "job_id" in data
-              assert len(data["job_id"]) == 36  # UUID format
+              assert len(data["job_id"]) == 36
 
           # Test 3: Created job is pushed onto the correct Redis queue key
           def test_create_job_pushes_to_correct_queue(client, fake_redis):
               client.post("/jobs")
-              queue_length = fake_redis.llen("jobs")
-              assert queue_length == 1
+              assert fake_redis.llen("jobs") == 1
 
           # Test 4: Created job has "queued" status in Redis
           def test_create_job_sets_queued_status(client, fake_redis):
               response = client.post("/jobs")
               job_id = response.json()["job_id"]
               status = fake_redis.hget(f"job:{job_id}", "status")
+              assert status is not None
               assert status.decode() == "queued"
 
           # Test 5: Getting a job status returns correct data
