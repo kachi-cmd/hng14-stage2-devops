@@ -1,0 +1,25 @@
+# Environment files — never commit real credentials
+.env
+.env.*
+!.env.example
+api/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Docker
+*.tar
+
+# OS
+.DS_Store
+Thumbs.db

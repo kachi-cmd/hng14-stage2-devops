@@ -1,0 +1,153 @@
+version: "3.9"
+
+# =============================================================================
+# Networks
+# A named internal network is required for two reasons:
+#   1. Service discovery — containers reach each other by service name
+#      (e.g. http://api:8000) only when they share a named network.
+#   2. Isolation — traffic between services never leaves this network
+#      and is not reachable from other containers on the Docker host.
+# =============================================================================
+networks:
+  app-net:
+    driver: bridge
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+
+  # ---------------------------------------------------------------------------
+  # Redis
+  # The message queue and job state store shared by the API and worker.
+  #
+  # Security note: there is deliberately NO ports: mapping here.
+  # Exposing Redis on the host (e.g. "6379:6379") is a common production
+  # mistake — Redis has no auth by default and would be reachable by anything
+  # on the host network. The API and worker reach it via the internal app-net
+  # using the service name "redis", so host exposure is unnecessary.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    networks:
+      - app-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPU_LIMIT:-0.25}"
+          memory: "${REDIS_MEMORY_LIMIT:-128M}"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # API (FastAPI / uvicorn)
+  #
+  # depends_on with condition: service_healthy means Docker will not start
+  # this container until Redis has passed its healthcheck. "service_started"
+  # (the default) only waits for the container process to exist — the service
+  # could still be initialising and reject connections. service_healthy
+  # actually waits for readiness.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: hng-api:${IMAGE_TAG:-latest}
+    networks:
+      - app-net
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPU_LIMIT:-0.5}"
+          memory: "${API_MEMORY_LIMIT:-256M}"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Worker (Python)
+  #
+  # Depends on both Redis (to dequeue jobs) and the API being healthy
+  # (so job state records exist in Redis before the worker tries to update
+  # them). The worker has no HTTP server so its healthcheck probes the
+  # sentinel file written after a confirmed Redis ping (see worker.py).
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    image: hng-worker:${IMAGE_TAG:-latest}
+    networks:
+      - app-net
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/worker_healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-0.5}"
+          memory: "${WORKER_MEMORY_LIMIT:-256M}"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Express / Node)
+  #
+  # The only service with a host port mapping — it is the single public
+  # entry point. All other services are reachable only via app-net.
+  # API_URL uses the internal service name, never localhost.
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: hng-frontend:${IMAGE_TAG:-latest}
+    networks:
+      - app-net
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      API_URL: http://api:8000
+      NODE_ENV: ${APP_ENV:-production}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "${FRONTEND_CPU_LIMIT:-0.25}"
+          memory: "${FRONTEND_MEMORY_LIMIT:-128M}"
+    restart: unless-stopped
