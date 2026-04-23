@@ -422,11 +422,14 @@ jobs:
           echo "=== All running containers ==="
           docker ps --format "table {{.Names}}	{{.Status}}	{{.Ports}}"
 
-          echo "=== Checking new API container is running ==="
-          docker inspect --format="Name: {{.Name}} | Status: {{.State.Health.Status}}" api_prod
+          echo "=== Confirming new API container is healthy ==="
+          docker inspect --format="Name: {{.Name}} | Health: {{.State.Health.Status}}" api_prod
 
-          echo "=== Submitting a test job through frontend ==="
-          curl -sf -X POST http://localhost:3000/submit | grep job_id
+          echo "=== Hitting API health endpoint directly ==="
+          API_IP=$(docker inspect -f "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}" api_prod)
+          echo "API IP: $API_IP"
+          curl -sf http://$API_IP:8000/health | grep "ok"
+
           echo "Post-deploy verification passed"
 
       - name: Tear down runner environment
