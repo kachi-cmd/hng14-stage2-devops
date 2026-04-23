@@ -1,33 +1,13 @@
 name: CI/CD Pipeline
 
-# Trigger on every push and pull request to any branch.
-# The deploy job has an additional guard (github.ref == 'refs/heads/main')
-# so it only runs on pushes to main — not on PRs or feature branches.
 on:
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
 
-# =============================================================================
-# IMPORTANT: A failure in any job prevents all subsequent jobs from running
-# because every job declares `needs: [previous_job]`. GitHub Actions will
-# skip all downstream jobs automatically when an upstream job fails.
-# =============================================================================
-
 jobs:
 
-  # ===========================================================================
-  # JOB 1 — LINT
-  # Runs three linters in sequence:
-  #   - flake8   : Python style and syntax errors (api + worker)
-  #   - eslint   : JavaScript code quality (frontend)
-  #   - hadolint : Dockerfile best-practice checks (all three Dockerfiles)
-  #
-  # WHY LINT FIRST: Linting is the fastest and cheapest check. Catching a
-  # syntax error or import issue here takes seconds. Catching it after a
-  # 3-minute Docker build wastes everyone's time.
-  # ===========================================================================
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -36,9 +16,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- Python linting (flake8) ---
-      # max-line-length=120 is a practical production setting.
-      # The default of 79 was set in 1979 for 80-column terminals.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -53,10 +30,6 @@ jobs:
       - name: Lint worker with flake8
         run: flake8 worker/ --max-line-length=120 --exclude=__pycache__
 
-      # --- JavaScript linting (eslint) ---
-      # eslint needs a config file. We create a minimal one inline so the
-      # repo doesn't need one pre-committed. In a real project you'd commit
-      # .eslintrc.json alongside the source code.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -78,12 +51,6 @@ jobs:
       - name: Lint frontend with eslint
         run: eslint frontend/app.js --max-warnings=0
 
-      # --- Dockerfile linting (hadolint) ---
-      # hadolint checks Dockerfiles against best practices — things like
-      # pinning base image versions, not running as root, avoiding apt-get
-      # without --no-install-recommends, etc.
-      # DL3008 is "pin versions in apt-get" — we ignore it because our
-      # slim images don't use apt-get for application deps.
       - name: Lint API Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
@@ -102,19 +69,6 @@ jobs:
           dockerfile: frontend/Dockerfile
           ignore: DL3008
 
-  # ===========================================================================
-  # JOB 2 — TEST
-  # Runs unit tests for the API using pytest.
-  # Redis is mocked — tests must not depend on real infrastructure.
-  #
-  # WHY MOCK REDIS: Unit tests should be fast, deterministic, and isolated.
-  # A test that talks to a real Redis is an integration test — it can fail
-  # for reasons unrelated to your code (Redis down, network blip, port clash).
-  # fakeredis gives you a real Redis-compatible interface in memory.
-  #
-  # Coverage is uploaded as a pipeline artifact so it can be reviewed
-  # without re-running the pipeline.
-  # ===========================================================================
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -144,13 +98,6 @@ jobs:
           import main
           from fastapi.testclient import TestClient
 
-          # The app instantiates `r = redis.Redis(...)` at module level when
-          # main.py is first imported. Patching redis.Redis at that point is
-          # too late — the real client is already created. Instead we replace
-          # main.r directly with a FakeRedis instance, which is the actual
-          # object the route handlers call. Both fixtures share the same
-          # FakeServer so reads and writes see the same data.
-
           @pytest.fixture(autouse=True)
           def fake_redis(monkeypatch):
               server = fakeredis.FakeServer()
@@ -162,13 +109,11 @@ jobs:
           def client():
               return TestClient(main.app)
 
-          # Test 1: Health endpoint returns 200 and correct body
           def test_health_endpoint(client):
               response = client.get("/health")
               assert response.status_code == 200
               assert response.json() == {"status": "ok"}
 
-          # Test 2: Creating a job returns a job_id in UUID format
           def test_create_job_returns_job_id(client):
               response = client.post("/jobs")
               assert response.status_code == 200
@@ -176,12 +121,10 @@ jobs:
               assert "job_id" in data
               assert len(data["job_id"]) == 36
 
-          # Test 3: Created job is pushed onto the correct Redis queue key
           def test_create_job_pushes_to_correct_queue(client, fake_redis):
               client.post("/jobs")
               assert fake_redis.llen("jobs") == 1
 
-          # Test 4: Created job has "queued" status in Redis
           def test_create_job_sets_queued_status(client, fake_redis):
               response = client.post("/jobs")
               job_id = response.json()["job_id"]
@@ -189,7 +132,6 @@ jobs:
               assert status is not None
               assert status.decode() == "queued"
 
-          # Test 5: Getting a job status returns correct data
           def test_get_job_status(client, fake_redis):
               post_response = client.post("/jobs")
               job_id = post_response.json()["job_id"]
@@ -199,7 +141,6 @@ jobs:
               assert data["job_id"] == job_id
               assert data["status"] == "queued"
 
-          # Test 6: Getting a non-existent job returns error
           def test_get_nonexistent_job(client):
               response = client.get("/jobs/00000000-0000-0000-0000-000000000000")
               assert response.status_code == 200
@@ -220,27 +161,11 @@ jobs:
           path: api/coverage.xml
           retention-days: 7
 
-  # ===========================================================================
-  # JOB 3 — BUILD
-  # Builds all three Docker images and pushes them to a local registry
-  # running as a service container inside the GitHub Actions runner.
-  #
-  # WHY A LOCAL REGISTRY: The brief says free tier only — no DockerHub
-  # credentials, no paid services. A registry:2 service container spins up
-  # alongside the job, accepts pushes on localhost:5000, and is torn down
-  # automatically when the job ends. Images are tagged with both the git SHA
-  # (immutable, traceable) and "latest" (convenient for compose).
-  #
-  # WHY TAG WITH GIT SHA: If a bug is reported in production you can instantly
-  # identify which exact commit is running. "latest" alone tells you nothing.
-  # ===========================================================================
   build:
     name: Build
     runs-on: ubuntu-latest
     needs: [test]
 
-    # The registry runs as a sidecar container inside this job.
-    # It's available at localhost:5000 for the duration of the job.
     services:
       registry:
         image: registry:2
@@ -303,95 +228,65 @@ jobs:
           curl -s http://localhost:5000/v2/_catalog | grep -q "hng-frontend"
           echo "All three images confirmed in registry"
 
-  # ===========================================================================
-  # JOB 4 — SECURITY SCAN
-  # Scans all three images with Trivy for known CVEs.
-  # Pipeline fails on any CRITICAL severity finding.
-  # Results are uploaded as a SARIF artifact for review in GitHub Security tab.
-  #
-  # WHY TRIVY: It scans OS packages AND language-specific deps (pip, npm)
-  # against the CVE database. A CRITICAL finding means a known exploitable
-  # vulnerability is present in your image — that should never reach production.
-  #
-  # WHY SARIF: GitHub's Security tab understands SARIF format and renders
-  # findings as annotated code alerts, making them easy to triage.
-  # ===========================================================================
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: [build]
 
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: network=host
-
-      # Rebuild images into this job's registry (each job gets a fresh runner)
-      - name: Rebuild images for scanning
+      - name: Build images for scanning
         run: |
-          docker build -t localhost:5000/hng-api:latest ./api
-          docker build -t localhost:5000/hng-worker:latest ./worker
-          docker build -t localhost:5000/hng-frontend:latest ./frontend
+          docker build -t hng-api:latest ./api
+          docker build -t hng-worker:latest ./worker
+          docker build -t hng-frontend:latest ./frontend
 
-      - name: Show Trivy findings in table format (for debugging)
+      - name: Install Trivy
         run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest image \
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.70.0
+
+      - name: Show CRITICAL findings in table format
+        run: |
+          echo "=== API image ==="
+          trivy image --severity CRITICAL --format table --no-progress hng-api:latest || true
+          echo "=== Worker image ==="
+          trivy image --severity CRITICAL --format table --no-progress hng-worker:latest || true
+          echo "=== Frontend image ==="
+          trivy image --severity CRITICAL --format table --no-progress hng-frontend:latest || true
+
+      - name: Scan API image (SARIF)
+        run: |
+          trivy image \
             --severity CRITICAL \
-            --format table \
-            localhost:5000/hng-api:latest || true
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest image \
+            --format sarif \
+            --output trivy-api.sarif \
+            --exit-code 1 \
+            --no-progress \
+            hng-api:latest
+
+      - name: Scan worker image (SARIF)
+        run: |
+          trivy image \
             --severity CRITICAL \
-            --format table \
-            localhost:5000/hng-worker:latest || true
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest image \
+            --format sarif \
+            --output trivy-worker.sarif \
+            --exit-code 1 \
+            --no-progress \
+            hng-worker:latest
+
+      - name: Scan frontend image (SARIF)
+        run: |
+          trivy image \
             --severity CRITICAL \
-            --format table \
-            localhost:5000/hng-frontend:latest || true
+            --format sarif \
+            --output trivy-frontend.sarif \
+            --exit-code 1 \
+            --no-progress \
+            hng-frontend:latest
 
-      - name: Scan API image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: localhost:5000/hng-api:latest
-          format: sarif
-          output: trivy-api.sarif
-          severity: CRITICAL
-          exit-code: "1"
-
-      - name: Scan worker image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: localhost:5000/hng-worker:latest
-          format: sarif
-          output: trivy-worker.sarif
-          severity: CRITICAL
-          exit-code: "1"
-
-      - name: Scan frontend image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: localhost:5000/hng-frontend:latest
-          format: sarif
-          output: trivy-frontend.sarif
-          severity: CRITICAL
-          exit-code: "1"
-
-      # Upload even if scans fail so you can review findings
       - name: Upload Trivy SARIF results
         uses: actions/upload-artifact@v4
         if: always()
@@ -403,22 +298,6 @@ jobs:
             trivy-frontend.sarif
           retention-days: 7
 
-  # ===========================================================================
-  # JOB 5 — INTEGRATION TEST
-  # Brings the full stack up inside the GitHub Actions runner, submits a
-  # real job through the frontend, polls until it completes, asserts the
-  # final status, then tears the stack down — regardless of outcome.
-  #
-  # WHY INTEGRATION TEST AFTER SECURITY SCAN: By this point we know the code
-  # is clean (lint), correct (unit tests), buildable (build), and safe
-  # (security). The integration test is the final gate — does the whole system
-  # actually work together as a live stack?
-  #
-  # WHY `if: always()` ON TEARDOWN: If the assertion fails, the job would
-  # stop there and leave containers running on the runner. That wastes runner
-  # resources and can cause port conflicts on retries. always() guarantees
-  # cleanup regardless of what happened before it.
-  # ===========================================================================
   integration:
     name: Integration Test
     runs-on: ubuntu-latest
@@ -432,19 +311,14 @@ jobs:
         run: cp .env.example .env
 
       - name: Build and start full stack
-        run: |
-          docker compose up --build -d --wait
+        run: docker compose up --build -d --wait
         timeout-minutes: 5
 
       - name: Confirm all services are healthy
-        run: |
-          docker compose ps
-          docker inspect --format='{{.Name}}: {{.State.Health.Status}}' \
-            $(docker compose ps -q) 2>/dev/null || true
+        run: docker compose ps
 
       - name: Submit a job and poll until completed
         run: |
-          # Submit a job through the frontend service
           echo "Submitting job..."
           RESPONSE=$(curl -sf -X POST http://localhost:3000/submit)
           echo "Response: $RESPONSE"
@@ -457,7 +331,6 @@ jobs:
             exit 1
           fi
 
-          # Poll every 2 seconds for up to 60 seconds (30 attempts)
           echo "Polling for completion..."
           for i in $(seq 1 30); do
             STATUS=$(curl -sf http://localhost:3000/status/$JOB_ID | \
@@ -484,44 +357,15 @@ jobs:
         if: always()
         run: docker compose down -v --remove-orphans
 
-  # ===========================================================================
-  # JOB 6 — DEPLOY
-  # Runs ONLY on pushes to main (not PRs, not feature branches).
-  # Performs a scripted rolling update:
-  #   1. Pull the new image
-  #   2. Start a new container
-  #   3. Wait up to 60s for its healthcheck to pass
-  #   4. If healthy: stop old container, rename new → canonical name
-  #   5. If not healthy within 60s: stop new container, leave old running
-  #
-  # WHY ROLLING UPDATE: Zero-downtime deployment. The old container keeps
-  # serving traffic until the new one proves it is healthy. If the new image
-  # has a startup bug, the old container is untouched — no outage.
-  #
-  # NOTE: In a real deployment this job would SSH into your production server.
-  # For this assessment the rolling update logic runs on the Actions runner
-  # itself to demonstrate the mechanism without requiring a live server.
-  # ===========================================================================
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
     needs: [integration]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: network=host
 
       - name: Create .env for compose
         run: cp .env.example .env
@@ -529,40 +373,38 @@ jobs:
       - name: Build images for deploy
         run: |
           SHA=${{ github.sha }}
-          docker build -t localhost:5000/hng-api:$SHA -t localhost:5000/hng-api:latest ./api
-          docker build -t localhost:5000/hng-worker:$SHA -t localhost:5000/hng-worker:latest ./worker
-          docker build -t localhost:5000/hng-frontend:$SHA -t localhost:5000/hng-frontend:latest ./frontend
+          docker build -t hng-api:$SHA -t hng-api:latest ./api
+          docker build -t hng-worker:$SHA -t hng-worker:latest ./worker
+          docker build -t hng-frontend:$SHA -t hng-frontend:latest ./frontend
 
       - name: Start initial stack (simulates existing production)
-        run: |
-          docker compose up -d --wait
+        run: docker compose up -d --wait
         timeout-minutes: 3
 
-      - name: Perform rolling update — API
+      - name: Perform rolling update
         run: |
           SHA=${{ github.sha }}
-          echo "Starting rolling update for API (image: $SHA)..."
+          NETWORK=$(docker network ls --filter name=app-net --format "{{.Name}}" | head -1)
+          echo "Using network: $NETWORK"
+          echo "Starting rolling update for API (sha: $SHA)..."
 
-          # Start new container on a temporary name alongside the running one
           docker run -d \
             --name api_new \
-            --network hng14-stage2-devops-k_app-net \
+            --network $NETWORK \
             -e REDIS_HOST=redis \
             -e REDIS_PORT=6379 \
-            localhost:5000/hng-api:$SHA
+            hng-api:$SHA
 
-          # Poll healthcheck for up to 60 seconds
-          echo "Waiting for new API container to become healthy..."
+          echo "Waiting up to 60s for new container to become healthy..."
           for i in $(seq 1 12); do
             STATUS=$(docker inspect --format='{{.State.Health.Status}}' api_new 2>/dev/null || echo "starting")
             echo "  attempt $i/12: $STATUS"
 
             if [ "$STATUS" = "healthy" ]; then
-              echo "New container is healthy — cutting over"
-              # Stop old container, promote new one
+              echo "Healthy — cutting over to new container"
               docker compose stop api
               docker compose rm -f api
-              docker rename api_new hng14-stage2-devops-k-api-1
+              docker rename api_new $(docker compose ps -q api 2>/dev/null || echo "api_prod")
               echo "Rolling update complete"
               exit 0
             fi
@@ -570,21 +412,17 @@ jobs:
             sleep 5
           done
 
-          # Health check never passed — abort, leave old container running
-          echo "ABORT: New container did not become healthy within 60s"
-          echo "Old container remains running — no downtime"
+          echo "ABORT: new container not healthy within 60s — old container untouched"
           docker stop api_new && docker rm api_new
           exit 1
 
-      - name: Verify stack is healthy post-deploy
+      - name: Verify post-deploy health
         run: |
-          sleep 5
+          sleep 3
           docker compose ps
-          echo "Verifying API health endpoint..."
-          curl -sf http://localhost:8000/health || \
-          curl -sf http://localhost:3000/status/healthcheck-probe || true
-          echo "Deploy verification complete"
+          curl -sf http://localhost:3000/submit -X POST | grep job_id
+          echo "Post-deploy verification passed"
 
-      - name: Tear down (cleanup runner)
+      - name: Tear down runner environment
         if: always()
         run: docker compose down -v --remove-orphans
