@@ -1,5 +1,3 @@
-version: "3.9"
-
 # =============================================================================
 # Networks
 # A named internal network is required for two reasons:

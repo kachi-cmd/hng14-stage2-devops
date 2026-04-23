@@ -404,8 +404,8 @@ jobs:
               echo "Healthy — cutting over to new container"
               docker compose stop api
               docker compose rm -f api
-              docker rename api_new $(docker compose ps -q api 2>/dev/null || echo "api_prod")
-              echo "Rolling update complete"
+              docker rename api_new api_prod
+              echo "Rolling update complete — new container is api_prod"
               exit 0
             fi
 
