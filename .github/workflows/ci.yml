@@ -419,8 +419,14 @@ jobs:
       - name: Verify post-deploy health
         run: |
           sleep 3
-          docker compose ps
-          curl -sf http://localhost:3000/submit -X POST | grep job_id
+          echo "=== All running containers ==="
+          docker ps --format "table {{.Names}}	{{.Status}}	{{.Ports}}"
+
+          echo "=== Checking new API container is running ==="
+          docker inspect --format="Name: {{.Name}} | Status: {{.State.Health.Status}}" api_prod
+
+          echo "=== Submitting a test job through frontend ==="
+          curl -sf -X POST http://localhost:3000/submit | grep job_id
           echo "Post-deploy verification passed"
 
       - name: Tear down runner environment
